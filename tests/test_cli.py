@@ -21,7 +21,7 @@ def test_the_headline_case_is_drift(capsys):
     assert main([r"\d+"]) == EXIT_DRIFT
     out = capsys.readouterr().out
     assert "behaviours" in out
-    assert "POSIX BRE and ERE have no \\d" in out
+    assert "never added \\d" in out
 
 
 @requires("grep", "grep -E")

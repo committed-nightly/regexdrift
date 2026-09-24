@@ -86,7 +86,7 @@ def test_a_warning_is_recorded_without_changing_the_group():
 
 def test_notes_fire_only_for_constructs_the_pattern_contains():
     slugs = {note.slug for note in explain(r"\d+")}
-    assert "class-escape" in slugs
+    assert "digit-escape" in slugs
     assert "bre-quantifier" in slugs
     assert "backreference" not in slugs
 
@@ -103,7 +103,7 @@ def test_an_escaped_metacharacter_is_not_a_bare_one():
 
 
 def test_an_escaped_backslash_before_d_is_not_a_class_escape():
-    assert "class-escape" not in {note.slug for note in explain(r"\\d")}
+    assert "digit-escape" not in {note.slug for note in explain(r"\\d")}
 
 
 def test_lazy_quantifier_is_detected():
@@ -120,3 +120,13 @@ def test_extended_group_is_detected():
 
 def test_a_plain_pattern_has_nothing_to_explain():
     assert explain("hello") == []
+
+
+def test_the_digit_note_and_the_gnu_class_note_are_separate():
+    r"""GNU grep honours `\s` and has never had `\d`, so one note cannot cover both.
+
+    A single note claiming POSIX has none of them printed underneath a table
+    showing grep -E matching `\s` was the bug this pins down.
+    """
+    assert {n.slug for n in explain(r"\d")} == {"digit-escape"}
+    assert {n.slug for n in explain(r"\s")} == {"gnu-class-escape"}

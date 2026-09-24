@@ -19,7 +19,14 @@ from typing import Callable
 
 from .syntax import Token, walk
 
-CLASS_ESCAPES = set("dDwWsSh")
+# Split deliberately, and only after running them. `\d` and `\w` are not in the
+# same boat at all: GNU grep, sed and gawk added `\w` and `\s` as extensions and
+# never added `\d`. A single note covering all of them read "POSIX BRE and ERE
+# have no \d, \w or \s", which was printed directly underneath a table showing
+# grep -E matching `\s` perfectly well. A note that contradicts the measurement
+# above it is worse than no note, because the measurement is the true part.
+DIGIT_ESCAPES = set("dD")
+GNU_CLASS_ESCAPES = set("wWsShH")
 BARE_QUANTIFIERS = set("+?")
 
 
@@ -33,8 +40,12 @@ def _tokens(pattern: str) -> list[Token]:
     return list(walk(pattern))
 
 
-def _has_class_escape(pattern: str) -> bool:
-    return any(t.kind == "escape" and t.escaped in CLASS_ESCAPES for t in _tokens(pattern))
+def _has_digit_escape(pattern: str) -> bool:
+    return any(t.kind == "escape" and t.escaped in DIGIT_ESCAPES for t in _tokens(pattern))
+
+
+def _has_gnu_class_escape(pattern: str) -> bool:
+    return any(t.kind == "escape" and t.escaped in GNU_CLASS_ESCAPES for t in _tokens(pattern))
 
 
 def _has_bare_quantifier(pattern: str) -> bool:
@@ -76,12 +87,22 @@ def _has_word_boundary(pattern: str) -> bool:
 
 NOTES: list[tuple[Callable[[str], bool], Note]] = [
     (
-        _has_class_escape,
+        _has_digit_escape,
         Note(
-            "class-escape",
-            "POSIX BRE and ERE have no \\d, \\w or \\s. In those dialects the "
-            "escape is the bare letter, so \\d matches a `d`. PCRE, Python and "
-            "ECMAScript read it as a character class. Nothing warns except gawk.",
+            "digit-escape",
+            "\\d belongs to PCRE, Python and ECMAScript. GNU grep, sed and awk "
+            "added \\w and \\s as extensions and never added \\d, so there it is "
+            "simply the letter d -- grep -Eo '\\d+%' looks for a run of d's "
+            "followed by a percent sign. Of all of them only gawk warns.",
+        ),
+    ),
+    (
+        _has_gnu_class_escape,
+        Note(
+            "gnu-class-escape",
+            "\\w and \\s are GNU extensions rather than POSIX. GNU grep, sed and "
+            "gawk all honour them; mawk and stricter POSIX engines read them as "
+            "the bare letter instead.",
         ),
     ),
     (

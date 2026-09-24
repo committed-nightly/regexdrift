@@ -149,8 +149,11 @@ NOTES: list[tuple[Callable[[str], bool], Note]] = [
         Note(
             "word-boundary",
             "\\b, \\B, \\< and \\> are word boundaries in GNU grep and sed, and "
-            "\\b is one in PCRE, Python and ECMAScript. mawk has none of them. "
-            "Inside a bracket expression \\b is a backspace instead.",
+            "\\b is one in PCRE, Python and ECMAScript. In awk it is a "
+            "backspace: gawk spells the word boundary \\y and mawk has none, so "
+            "a \\bword\\b moved from grep into awk looks for a control "
+            "character, matches nothing, and does not complain. Inside a bracket "
+            "expression \\b is a backspace everywhere.",
         ),
     ),
 ]

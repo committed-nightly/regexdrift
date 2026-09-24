@@ -54,6 +54,13 @@ CLASS_SAMPLES = {
     "t": "\t",
 }
 
+# Escapes that match a position rather than a character. Under the reading where
+# escapes mean what PCRE says they mean, these contribute nothing to the probe --
+# so `\bword\b` gets a probe of `word`. Without this they read as the letters `b`
+# and `B`, no probe is ever the bare word, and the tool finds no disagreement
+# about the single most common escape in anyone's grep history.
+ZERO_WIDTH_ESCAPES = set("bBAZz<>")
+
 QUANTIFIER_CHARS = "+*?"
 
 # Substituted where the pattern says "any character".
@@ -211,7 +218,9 @@ def _read(branch: str, *, classes: bool, quantifiers: str) -> str:
                     _repeat(units, REPS if quantifiers == "max" else (1 if nxt == "+" else 0))
                 i += 2
                 continue
-            if classes and nxt in CLASS_SAMPLES:
+            if classes and nxt in ZERO_WIDTH_ESCAPES:
+                pass  # matches a position, contributes no character
+            elif classes and nxt in CLASS_SAMPLES:
                 units.append(CLASS_SAMPLES[nxt])
             else:
                 units.append(nxt)

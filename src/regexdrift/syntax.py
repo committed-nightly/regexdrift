@@ -39,11 +39,18 @@ class Token(NamedTuple):
 def bracket_end(pattern: str, start: int) -> int:
     """Index just past the bracket expression beginning at `start`.
 
-    POSIX says a `]` immediately after the opening bracket, or after a leading
-    `^`, is a literal member rather than the close -- so `[]]` is a bracket
-    expression matching one `]`, not an empty one followed by a stray bracket.
-    A character class like `[[:digit:]]` is handled by the same rule, since the
-    inner `]` closing `:]` is not the first character.
+    Two POSIX rules, and the second one was got wrong first time round.
+
+    A `]` immediately after the opening bracket, or after a leading `^`, is a
+    literal member rather than the close -- so `[]]` is a bracket expression
+    matching one `]`, not an empty one followed by a stray bracket.
+
+    And a `]` inside a `[: :]`, `[. .]` or `[= =]` sequence does not close the
+    bracket expression either. `[[:digit:]]` is eleven characters, not ten. An
+    earlier version of this claimed the first rule covered that case as well,
+    which it does not, and stopped at the `]` that closes `:]` -- so
+    `[[:digit:]]` came back as the bracket `[[:digit:]` plus a trailing `]`, and
+    no probe for it ever contained a digit.
 
     An unterminated bracket comes back as the rest of the pattern. That is not a
     guess about what it means; it is a guess about where it stops, and the
@@ -59,6 +66,12 @@ def bracket_end(pattern: str, start: int) -> int:
         if pattern[i] == "\\" and i + 1 < len(pattern):
             i += 2
             continue
+        if pattern[i] == "[" and i + 1 < len(pattern) and pattern[i + 1] in ":.=":
+            closing = pattern[i + 1] + "]"
+            end = pattern.find(closing, i + 2)
+            if end != -1:
+                i = end + 2
+                continue
         if pattern[i] == "]":
             return i + 1
         i += 1

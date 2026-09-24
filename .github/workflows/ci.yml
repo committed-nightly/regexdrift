@@ -1,0 +1,108 @@
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      # gawk and mawk are both wanted, and they are alternatives for /usr/bin/awk
+      # rather than one package -- the adapters call each binary by name for that
+      # reason. ripgrep is the only RE2-family engine in the list.
+      - name: install the engines
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq gawk mawk ripgrep
+
+      - run: pip install -e ".[dev]"
+
+      - name: every engine is actually installed
+        # The suite skips per-engine tests for anything missing, which is the
+        # right behaviour on a stranger's laptop and a trap in CI: it would go
+        # green having tested four engines and reported agreement between them.
+        # This step is what makes the skips safe.
+        run: |
+          regexdrift --list-engines
+          if regexdrift --list-engines | grep -q missing; then
+            echo "an engine is missing, so the suite below is skipping rather than passing"
+            exit 1
+          fi
+
+      - run: python -m pytest
+
+  dogfood:
+    # Run it on the patterns it was built for. A tool that has only ever been run
+    # by its own test suite is a tool nobody has run.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: install the engines
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq gawk mawk ripgrep
+      - run: pip install -e .
+
+      # `code=0; cmd || code=$?` rather than `cmd; code=$?`, because these steps
+      # run under `bash -e` and finding drift is an exit 1 on purpose.
+      - name: the oh-my-zsh battery pattern is caught
+        run: |
+          code=0; regexdrift '\d+%' || code=$?
+          test "$code" -eq 1 || { echo "expected exit 1, got $code"; exit 1; }
+          regexdrift '\d+%' | grep -q 'never added' \
+            || { regexdrift '\d+%'; echo "wrong or missing note"; exit 1; }
+
+      - name: a word boundary moved into awk is caught
+        # In awk \b is a backspace, so this matches nothing there and says
+        # nothing about it. gawk spells the boundary \y; mawk has neither.
+        run: |
+          code=0; regexdrift '\bversion\b' --engine grep --engine gawk || code=$?
+          test "$code" -eq 1 || { echo "expected exit 1, got $code"; exit 1; }
+
+      - name: a portable pattern stays quiet
+        # The guard on the whole tool. If this ever exits non-zero, regexdrift
+        # has started reporting drift that is not there, which would make every
+        # other finding above worthless.
+        run: |
+          regexdrift 'hello'
+          regexdrift '[0-9][0-9]*%'
+          regexdrift '^[a-z_][a-z0-9_]*$'
+
+      - name: a missing engine is named, never dropped
+        run: |
+          regexdrift 'hello' --engine grep --engine 'grep -E' --json \
+            | python -c 'import json,sys; d=json.load(sys.stdin); assert d["drift"] is False, d'
+
+      - name: nothing to compare is exit 2, not exit 0
+        run: |
+          code=0; regexdrift 'hello' --engine grep || code=$?
+          test "$code" -eq 2 || { echo "expected exit 2, got $code"; exit 1; }
+
+  actionlint:
+    # logbook#23: nothing in the org runs this, and a workflow that does not
+    # compile produces no jobs, no logs and no annotations to read afterwards.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: actionlint
+        run: |
+          bash <(curl -sSf https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash)
+          ./actionlint -color

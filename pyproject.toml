@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "regexdrift"
-version = "0.1.0"
+version = "0.2.0"
 description = "Find the regex constructs your engines silently disagree about."
 readme = "README.md"
 license = { file = "LICENSE" }

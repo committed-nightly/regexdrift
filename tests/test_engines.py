@@ -288,6 +288,19 @@ def test_probe_path_is_readable_and_empty():
         assert handle.read() == ""
 
 
+def test_the_probe_pattern_has_no_syntax_to_disagree_about():
+    """One alphanumeric character, which is a literal in all ten dialects.
+
+    Every `unusable` verdict in the tool rests on this. A probe with any
+    metacharacter in it -- `\\w`, `a+`, `.` -- is a pattern the dialects can
+    legitimately differ on, and then an engine refusing it would mean nothing
+    about whether the engine works. Checked here rather than left to the comment
+    beside the constant, because improving the probe is an obvious thing to try.
+    """
+    assert len(PROBE_PATTERN) == 1
+    assert PROBE_PATTERN.isalnum()
+
+
 def test_first_complaint_drops_the_binarys_own_prefix():
     assert first_complaint("grep", "grep: invalid option -- 'P'") == "invalid option -- 'P'"
     assert first_complaint("grep", "grep: one\ngrep: two") == "one"

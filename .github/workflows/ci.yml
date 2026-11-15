@@ -50,40 +50,41 @@ jobs:
         # they rot rather than quiet, and each state produced on purpose below so
         # that nothing here is asserting against a string that cannot appear.
         run: |
+          # Written as `if ! ...; then` rather than `|| { ... }` across lines,
+          # which deadassert reads as decorative -- it joins the `||` branch at
+          # the newline and so never sees the `exit 1`. The step does fail; the
+          # finding is a false positive, minimal repro in logbook#73.
           regexdrift --list-engines
 
           # The denominator is deliberately literal. Add an engine and this step
           # goes red until it is installed in this job too, which is the point.
-          regexdrift --list-engines \
-            | grep -qxF '10 of 10 engines can answer here.' || {
-                echo "not every engine can answer here, so the suite below skips rather than passes"
-                exit 1
-              }
+          if ! regexdrift --list-engines | grep -qxF '10 of 10 engines can answer here.'; then
+            echo "not every engine can answer here, so the suite below skips rather than passes"
+            exit 1
+          fi
 
           # Witness 1, the missing state. Needs no fixture: an empty PATH does
           # it. python stays ready because its binary is sys.executable, an
           # absolute path -- which is the clearest statement available of what a
           # PATH check can and cannot see.
-          env PATH=/var/empty "$(command -v regexdrift)" --list-engines \
-            | grep -qxF '1 of 10 engines can answer here. 9 missing, 0 installed but unusable.' || {
-                echo "the empty-PATH witness did not report 9 of 10 missing"
-                env PATH=/var/empty "$(command -v regexdrift)" --list-engines || true
-                exit 1
-              }
+          empty_path=$(env PATH=/var/empty "$(command -v regexdrift)" --list-engines)
+          echo "$empty_path"
+          if ! echo "$empty_path" | grep -qxF '1 of 10 engines can answer here. 9 missing, 0 installed but unusable.'; then
+            echo "the empty-PATH witness did not report 9 of 10 missing"
+            exit 1
+          fi
 
           # Witness 2, the state a PATH check cannot see at all. The shim is a
           # grep that exits 2 on -P and forwards everything else, which is what
           # busybox grep, BSD grep and a --disable-perl-regexp GNU grep all do.
-          # The assignments prefix regexdrift only, so the grep on the right of
-          # the pipe is the real one and not the shim.
-          SHIM_REAL_GREP="$(command -v grep)" PATH="$PWD/tests/shims/grep-without-pcre:$PATH" \
-            regexdrift --list-engines \
-            | grep -qxF '9 of 10 engines can answer here. 0 missing, 1 installed but unusable.' || {
-                echo "the no-PCRE witness did not report grep -P unusable"
-                SHIM_REAL_GREP="$(command -v grep)" PATH="$PWD/tests/shims/grep-without-pcre:$PATH" \
-                  regexdrift --list-engines || true
-                exit 1
-              }
+          # The assignments prefix regexdrift only, so every grep below is the
+          # real one and not the shim.
+          no_pcre=$(SHIM_REAL_GREP="$(command -v grep)" PATH="$PWD/tests/shims/grep-without-pcre:$PATH" regexdrift --list-engines)
+          echo "$no_pcre"
+          if ! echo "$no_pcre" | grep -qxF '9 of 10 engines can answer here. 0 missing, 1 installed but unusable.'; then
+            echo "the no-PCRE witness did not report grep -P unusable"
+            exit 1
+          fi
 
       - run: python -m pytest
 

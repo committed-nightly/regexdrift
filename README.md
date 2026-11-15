@@ -37,7 +37,7 @@ input    7 generated probes — pass a FILE or - to use your own
             matched, of the disputed lines: `777%`  `7%`
 
   warned    gawk: regexp escape sequence `\d' is not a known regexp operator
-  not run   rg (not installed)
+  not run   rg: rg is not on PATH
 
 why they might differ
   · \d belongs to PCRE, Python and ECMAScript. GNU grep, sed and awk added \w
@@ -77,7 +77,7 @@ pip install .
 regexdrift PATTERN            # generate probe input
 regexdrift PATTERN FILE       # use a real corpus
 regexdrift PATTERN -          # read the corpus from stdin
-regexdrift --list-engines     # what is installed here
+regexdrift --list-engines     # which engines can actually answer here
 ```
 
 Against a real file, the report gives line numbers and shows only the lines the
@@ -116,9 +116,38 @@ Whatever is on your `PATH`, from this list:
 | `node` | ECMAScript `RegExp` |
 | `rg` | Rust `regex` (RE2 family) |
 
-Missing engines are named in the report rather than dropped from it. "Nine
-engines agreed" quietly becoming a statement about four of them is the failure
-this tool is otherwise about.
+Engines that could not answer are named in the report rather than dropped from
+it, each with the reason. "Nine engines agreed" quietly becoming a statement
+about four of them is the failure this tool is otherwise about.
+
+There are three reasons an engine does not answer, and `--list-engines` tells
+them apart by asking each one to compile a single literal character:
+
+```console
+$ regexdrift --list-engines
+  grep     POSIX BRE (GNU grep)              ready
+  grep -E  POSIX ERE (GNU grep)              ready
+  grep -P  PCRE2                             unusable — grep is on PATH but refused 'a', which every dialect takes: invalid option -- 'P'
+  sed      POSIX BRE (GNU sed)               ready
+  ...
+  rg       Rust regex (RE2 family)           missing — rg is not on PATH
+
+8 of 10 engines can answer here. 1 missing, 1 installed but unusable.
+Measured by asking each engine for 'a'; a ready engine can still refuse your pattern.
+```
+
+`unusable` is the one worth knowing about, and the reason this is a question
+asked of the engine rather than of `PATH`. Three of the ten names above are
+*modes* of a binary rather than binaries, and a mode can be absent while the
+binary is installed: PCRE2 is a compile-time option in GNU grep
+(`--disable-perl-regexp`), busybox grep has never had it, and macOS grep does
+not take `-P` at all. On any of those, `grep -P` is on `PATH` and will answer
+nothing — and a mode saying no by exiting 2 is indistinguishable, from outside,
+from grep rejecting your pattern. It was reported as the latter until v0.2.0.
+
+The third reason is `sed` specifically: a pattern that contains every character
+`sed` could use as an address delimiter leaves none free, so `sed` is reported
+as unable to answer about that one pattern rather than guessed at.
 
 ## Three things it is opinionated about
 
@@ -155,7 +184,9 @@ probes" and never as "the engines agree". If you have a corpus, use it.
 
 - **No BSD tooling.** macOS `grep` and `sed` are a different implementation with
   their own gaps, and are much of why `\d` in a shell script is a bad idea. This
-  reports what is installed, so on Linux it cannot speak for them.
+  runs what is on the box, so on Linux it cannot speak for them. Run on a Mac it
+  reports what a Mac has, which includes `grep -P` as `unusable` rather than as
+  PCRE2 refusing your pattern.
 - **One line at a time.** Every engine here is run in a line-oriented mode, so
   patterns spanning newlines are out of scope.
 - **No opinion on which engine is right.** It tells you they differ. Which one you

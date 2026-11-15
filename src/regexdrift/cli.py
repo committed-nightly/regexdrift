@@ -31,7 +31,17 @@ import tempfile
 
 from . import probes as probe_module
 from .compare import Comparison, compare
-from .engines import ENGINES, Engine, Result, installed, select_engines
+from .engines import (
+    ENGINES,
+    PROBE_PATTERN,
+    Engine,
+    Readiness,
+    Result,
+    first_complaint,
+    installed,
+    readiness,
+    select_engines,
+)
 from .notes import explain
 
 EXIT_OK = 0
@@ -138,19 +148,43 @@ def _tidy(result: Result, temp_path: str) -> Result:
 
 
 def _strip_prefix(engine: str, text: str) -> str:
-    """The first line of an engine's complaint, without it re-introducing itself."""
-    first = text.splitlines()[0] if text else ""
-    binary = engine.split()[0]
-    if first.startswith(f"{binary}: "):
-        first = first[len(binary) + 2 :]
-    return first
+    """The first line of an engine's complaint, without it re-introducing itself.
+
+    The engine's *name* is all this has, so the binary is guessed from it. That
+    is right for every engine whose name starts with its binary and harmless for
+    the two whose does not.
+    """
+    return first_complaint(engine.split()[0], text)
 
 
 def _list_engines() -> int:
+    """What can actually be asked here, and the denominator it was counted over.
+
+    This used to print `installed`, from `shutil.which`, and that is a claim
+    about a binary where every reader took it for a claim about an engine. A
+    grep with no PCRE is installed. So each engine is now asked, once, whether
+    it can compile the simplest pattern there is, and `ready` means it answered.
+    """
     width = max(len(e.name) for e in ENGINES)
-    for engine in ENGINES:
-        state = "installed" if engine.available() else f"missing ({engine.binary})"
-        print(f"  {engine.name:<{width}}  {engine.dialect:<32}  {state}")
+    counts = {state: 0 for state in Readiness}
+    for engine, state, detail in readiness():
+        counts[state] += 1
+        shown = state.value if state is Readiness.READY else f"{state.value} — {detail}"
+        print(f"  {engine.name:<{width}}  {engine.dialect:<32}  {shown}")
+    print()
+    total = len(ENGINES)
+    ready = counts[Readiness.READY]
+    print(f"{ready} of {total} engines can answer here.", end="")
+    missing, unusable = counts[Readiness.MISSING], counts[Readiness.UNUSABLE]
+    if missing or unusable:
+        print(f" {missing} missing, {unusable} installed but unusable.")
+    else:
+        print()
+    # The honest caveat, and the reason this is a readiness check and not a
+    # promise: `ready` was earned on one literal character. A valid PCRE is not
+    # a valid BRE, and an engine that is ready here can still refuse your
+    # pattern -- which is the whole subject of the tool, not a defect in it.
+    print(f"Measured by asking each engine for {PROBE_PATTERN!r}; a ready engine can still refuse your pattern.")
     return EXIT_OK
 
 
@@ -199,8 +233,12 @@ def render(comparison: Comparison, chosen: list[Engine], generated: bool, all_li
         print(f"  refused   {result.engine}: {why}")
     for result in comparison.warned:
         print(f"  warned    {result.engine}: {_strip_prefix(result.engine, result.warning)}")
-    if comparison.unavailable:
-        print(f"  not run   {', '.join(r.engine for r in comparison.unavailable)} (not installed)")
+    # Each of these says why it could not run, rather than all of them being
+    # labelled "(not installed)". That label was hardcoded, and it was already
+    # wrong for a sed with no delimiter left -- which is sed being installed and
+    # unable to take this one pattern.
+    for result in comparison.unavailable:
+        print(f"  not run   {result.engine}: {result.message or 'no reason given'}")
     if comparison.rejected or comparison.warned or comparison.unavailable:
         print()
 
@@ -230,7 +268,10 @@ def to_json(comparison: Comparison, chosen: list[Engine], generated: bool) -> di
         ],
         "refused": [{"engine": r.engine, "message": r.message} for r in comparison.rejected],
         "warned": [{"engine": r.engine, "message": r.warning} for r in comparison.warned],
-        "not_installed": [r.engine for r in comparison.unavailable],
+        # Was "not_installed": [name]. An engine can be absent for three
+        # reasons and only one of them is a missing package, so the key names
+        # what happened and carries the reason with it.
+        "not_run": [{"engine": r.engine, "reason": r.message} for r in comparison.unavailable],
         "notes": [{"slug": n.slug, "text": n.text} for n in explain(comparison.pattern)]
         if comparison.drifted
         else [],

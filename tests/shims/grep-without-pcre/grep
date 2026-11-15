@@ -1,0 +1,21 @@
+#!/bin/sh
+# A grep with no PCRE, which is not a hypothetical: PCRE2 is a compile-time
+# option in GNU grep (--disable-perl-regexp), busybox grep has never had it, and
+# BSD/macOS grep does not take -P at all. All of them say no the same way, by
+# exiting 2 -- and exit 2 is what regexdrift reads as "this engine refused your
+# pattern", which is how a missing PCRE2 came to be reported as PCRE2 having an
+# opinion. This shim is the smallest thing that reproduces that honestly: every
+# other mode of grep keeps working, because the binary really is installed.
+#
+# The scan stops at -e because that is how regexdrift passes the pattern, and a
+# pattern is allowed to contain a capital P.
+for arg in "$@"; do
+  [ "$arg" = "-e" ] && break
+  case "$arg" in
+    -*P*)
+      echo "grep: support for the -P option is not compiled into this --disable-perl-regexp binary" >&2
+      exit 2
+      ;;
+  esac
+done
+exec "${SHIM_REAL_GREP:-/usr/bin/grep}" "$@"

@@ -17,11 +17,17 @@ from conftest import requires
 from regexdrift.engines import (
     BY_NAME,
     ENGINES,
+    PROBE_PATH,
+    PROBE_PATTERN,
     SED_DELIMITERS,
+    Readiness,
+    Result,
     Status,
     _sed_delimiter,
+    first_complaint,
     installed,
     parse_numbers,
+    readiness,
     select_engines,
 )
 
@@ -175,3 +181,133 @@ def test_awk_program_text_contains_no_interpolation():
     assert "REGEXDRIFT_PATTERN" in _AWK_PROGRAM
     assert "{" in _AWK_PROGRAM
     assert os.environ.get("REGEXDRIFT_PATTERN") is None
+
+
+# --- can this engine answer at all -------------------------------------------
+#
+# The bug these pin down: `shutil.which` answers for a binary, and `grep -E`,
+# `grep -P` and `sed -E` are modes of one. A mode that is not there says so by
+# exiting 2, which this adapter reads as a refusal, so PCRE2 being absent was
+# reported as PCRE2 refusing the pattern -- agreement among the rest, and the
+# dialect the tool exists to contrast against POSIX silently out of the room.
+
+
+def test_every_engine_on_path_can_answer_the_probe():
+    """PROBE_PATTERN has to be acceptable to every dialect or it decides nothing.
+
+    If this fails, the probe itself is the finding: an engine is being called
+    unusable because of the pattern it was asked, not because of what it is. It
+    is asserted over whatever is installed here rather than a fixed list, so it
+    gets stronger on a machine with more engines and never weaker.
+    """
+    asked = [e for e in ENGINES if e.available()]
+    assert asked, "no engines on PATH at all, so this asserts nothing"
+    not_ready = [(e.name, e.readiness()) for e in asked if e.readiness()[0] is not Readiness.READY]
+    assert not_ready == [], f"the probe {PROBE_PATTERN!r} is not universally acceptable: {not_ready}"
+
+
+def test_a_mode_the_binary_does_not_have_is_unavailable_not_a_refusal(grep_without_pcre, write_lines):
+    """The whole point. grep is installed; PCRE2 is not."""
+    path = write_lines(["a1", "bb"])
+    result = BY_NAME["grep -P"].run(r"\d", path)
+    assert result.status is Status.UNAVAILABLE, f"still filed as {result.status}: {result.message}"
+    assert "grep" in result.message
+    assert "-P" in result.message
+
+
+def test_the_other_modes_of_that_same_binary_still_answer(grep_without_pcre, write_lines):
+    """A missing mode must not take the working ones with it.
+
+    Without this, "report the engine as unavailable" could be satisfied by
+    giving up on grep entirely, which would lose two engines to fix one.
+    """
+    path = write_lines(["a1", "bb", "cc3"])
+    for name in ("grep", "grep -E"):
+        result = BY_NAME[name].run("[0-9]", path)
+        assert result.status is Status.ACCEPTED, f"{name}: {result.message}"
+        assert result.matched == {1, 3}
+
+
+def test_readiness_calls_that_mode_unusable_and_the_binary_present(grep_without_pcre):
+    states = {engine.name: state for engine, state, _ in readiness()}
+    assert states["grep -P"] is Readiness.UNUSABLE
+    assert states["grep"] is Readiness.READY
+    assert states["grep -E"] is Readiness.READY
+
+
+@requires("grep -P")
+def test_a_real_refusal_is_not_turned_into_unavailability(write_lines):
+    """The control, and the one that would catch an over-eager probe.
+
+    A working grep -P handed a pattern it cannot compile has refused the
+    pattern. If the probe swallowed this into UNAVAILABLE, every genuine
+    portability finding in the tool would quietly become "engine not run".
+    """
+    path = write_lines(["a1"])
+    for pattern in ("(", "a{2,1}"):
+        result = BY_NAME["grep -P"].run(pattern, path)
+        assert result.status is Status.REJECTED, f"{pattern!r} came back {result.status}"
+        assert result.message
+
+
+def test_readiness_names_the_binary_it_could_not_find(monkeypatch):
+    monkeypatch.setattr("shutil.which", lambda binary: None)
+    state, detail = BY_NAME["rg"].readiness()
+    assert state is Readiness.MISSING
+    assert "rg" in detail
+
+
+def test_a_timeout_stays_a_refusal_and_is_not_re_asked(monkeypatch, write_lines):
+    """A pattern that backtracks forever is about the pattern, not the engine.
+
+    Asserted by making the second call -- the probe -- answer differently from
+    the first. If `run` re-asked after a timeout it would read the second answer
+    and report UNAVAILABLE, so this fails if the timed_out flag stops working.
+    """
+    import subprocess as sp
+
+    calls = []
+
+    def fake_run(argv, **kwargs):
+        calls.append(argv)
+        if len(calls) == 1:
+            raise sp.TimeoutExpired(argv, 10)
+        raise AssertionError("the probe ran after a timeout")
+
+    monkeypatch.setattr("regexdrift.engines.subprocess.run", fake_run)
+    result = BY_NAME["grep"].run("(a+)+b", write_lines(["a" * 40]))
+    assert result.status is Status.REJECTED
+    assert result.timed_out is True
+    assert len(calls) == 1
+
+
+def test_probe_path_is_readable_and_empty():
+    """os.devnull, not the caller's input: no temp file, no read, always there."""
+    assert os.path.exists(PROBE_PATH)
+    with open(PROBE_PATH, encoding="utf-8") as handle:
+        assert handle.read() == ""
+
+
+def test_first_complaint_drops_the_binarys_own_prefix():
+    assert first_complaint("grep", "grep: invalid option -- 'P'") == "invalid option -- 'P'"
+    assert first_complaint("grep", "grep: one\ngrep: two") == "one"
+    assert first_complaint("sed", "something else entirely") == "something else entirely"
+    assert first_complaint("sed", "") == ""
+
+
+def test_readiness_covers_every_engine_exactly_once():
+    rows = readiness()
+    assert [engine.name for engine, _, _ in rows] == [engine.name for engine in ENGINES]
+
+
+def test_a_ready_engine_reports_no_reason_and_an_unready_one_always_does():
+    """The report prints `detail` only when it is not READY, so it must be there."""
+    for engine, state, detail in readiness():
+        if state is Readiness.READY:
+            assert detail == "", f"{engine.name} is ready and still explaining itself"
+        else:
+            assert detail, f"{engine.name} is {state.value} with no reason given"
+
+
+def test_result_defaults_to_not_timed_out():
+    assert Result("x", Status.ACCEPTED).timed_out is False

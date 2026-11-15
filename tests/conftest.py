@@ -1,8 +1,15 @@
 from __future__ import annotations
 
+import os
+import shutil
+from functools import lru_cache
+from pathlib import Path
+
 import pytest
 
-from regexdrift.engines import BY_NAME
+from regexdrift.engines import BY_NAME, Readiness
+
+SHIM_ROOT = Path(__file__).parent / "shims"
 
 
 def pytest_configure(config):
@@ -21,8 +28,19 @@ def write_lines(tmp_path):
     return write
 
 
+@lru_cache(maxsize=None)
+def _can_answer(name: str) -> str:
+    """Whether this engine can answer here, as a reason or "" for yes.
+
+    Cached, because it costs a subprocess and the `requires` decorators ask
+    about the same ten engines across twenty-odd call sites at import time.
+    """
+    state, detail = BY_NAME[name].readiness()
+    return "" if state is Readiness.READY else f"{name} is {state.value}"
+
+
 def requires(*names: str):
-    """Skip unless every named engine is installed.
+    """Skip unless every named engine can actually answer.
 
     Engines are skipped individually rather than the suite refusing to run,
     because the tool's whole posture is that a missing engine is a known
@@ -30,8 +48,39 @@ def requires(*names: str):
     test_engines.py::test_the_baseline_engines_are_present, which fails outright
     if the four engines every Linux box has are not there -- so a CI machine
     cannot quietly skip its way to green.
+
+    This asked `available()` until the readiness work, which is a PATH check,
+    and so could not skip a test on a grep whose `-P` does not exist: the test
+    ran and failed with a portability finding that was really a missing engine.
+    The skip and the tool now draw the line in the same place.
     """
     import pytest as _pytest
 
-    missing = [n for n in names if not BY_NAME[n].available()]
-    return _pytest.mark.skipif(bool(missing), reason=f"not installed: {', '.join(missing)}")
+    unanswerable = [reason for reason in (_can_answer(n) for n in names) if reason]
+    return _pytest.mark.skipif(
+        bool(unanswerable), reason="cannot answer here: " + ", ".join(unanswerable)
+    )
+
+
+@pytest.fixture
+def grep_without_pcre(monkeypatch):
+    """Put a grep with no PCRE first on PATH, and leave everything else alone.
+
+    This is the state `shutil.which` cannot see and the one the tool used to
+    misreport: the binary is installed, three engines run through it, and one of
+    its modes does not exist. Real on busybox, on BSD, and on any GNU grep built
+    --disable-perl-regexp.
+
+    The real grep is handed to the shim by name rather than found on PATH,
+    because the shim is about to *be* the grep on PATH and would otherwise
+    re-exec itself.
+    """
+    real = shutil.which("grep")
+    if real is None:
+        pytest.skip("no grep to wrap")
+    shim = SHIM_ROOT / "grep-without-pcre"
+    if not os.access(shim / "grep", os.X_OK):
+        pytest.skip(f"{shim / 'grep'} is not executable")
+    monkeypatch.setenv("SHIM_REAL_GREP", real)
+    monkeypatch.setenv("PATH", f"{shim}{os.pathsep}{os.environ['PATH']}")
+    return shim

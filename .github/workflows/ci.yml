@@ -32,17 +32,58 @@ jobs:
 
       - run: pip install -e ".[dev]"
 
-      - name: every engine is actually installed
-        # The suite skips per-engine tests for anything missing, which is the
-        # right behaviour on a stranger's laptop and a trap in CI: it would go
-        # green having tested four engines and reported agreement between them.
-        # This step is what makes the skips safe.
+      - name: every engine can actually answer, and this step can tell when one cannot
+        # The suite skips per-engine tests for anything that cannot answer, which
+        # is right on a stranger's laptop and a trap in CI: it would go green
+        # having tested four engines and reported agreement between them. This
+        # step is what makes the skips safe.
+        #
+        # It was `--list-engines | grep -q missing`, which had both problems in
+        # logbook#64 at once. Negated and unwitnessed: green whether or not the
+        # word could ever appear, so renaming the state would have retired the
+        # check silently. And aimed one layer above the thing it guards --
+        # `grep -P` is a mode of a binary, not a binary, so a grep built without
+        # PCRE is on PATH, answers nothing, and passed this check. Verified: with
+        # tests/shims/grep-without-pcre first on PATH the old step was green.
+        #
+        # So: positive assertions on a counted summary line, which go red when
+        # they rot rather than quiet, and each state produced on purpose below so
+        # that nothing here is asserting against a string that cannot appear.
         run: |
           regexdrift --list-engines
-          if regexdrift --list-engines | grep -q missing; then
-            echo "an engine is missing, so the suite below is skipping rather than passing"
-            exit 1
-          fi
+
+          # The denominator is deliberately literal. Add an engine and this step
+          # goes red until it is installed in this job too, which is the point.
+          regexdrift --list-engines \
+            | grep -qxF '10 of 10 engines can answer here.' || {
+                echo "not every engine can answer here, so the suite below skips rather than passes"
+                exit 1
+              }
+
+          # Witness 1, the missing state. Needs no fixture: an empty PATH does
+          # it. python stays ready because its binary is sys.executable, an
+          # absolute path -- which is the clearest statement available of what a
+          # PATH check can and cannot see.
+          env PATH=/var/empty "$(command -v regexdrift)" --list-engines \
+            | grep -qxF '1 of 10 engines can answer here. 9 missing, 0 installed but unusable.' || {
+                echo "the empty-PATH witness did not report 9 of 10 missing"
+                env PATH=/var/empty "$(command -v regexdrift)" --list-engines || true
+                exit 1
+              }
+
+          # Witness 2, the state a PATH check cannot see at all. The shim is a
+          # grep that exits 2 on -P and forwards everything else, which is what
+          # busybox grep, BSD grep and a --disable-perl-regexp GNU grep all do.
+          # The assignments prefix regexdrift only, so the grep on the right of
+          # the pipe is the real one and not the shim.
+          SHIM_REAL_GREP="$(command -v grep)" PATH="$PWD/tests/shims/grep-without-pcre:$PATH" \
+            regexdrift --list-engines \
+            | grep -qxF '9 of 10 engines can answer here. 0 missing, 1 installed but unusable.' || {
+                echo "the no-PCRE witness did not report grep -P unusable"
+                SHIM_REAL_GREP="$(command -v grep)" PATH="$PWD/tests/shims/grep-without-pcre:$PATH" \
+                  regexdrift --list-engines || true
+                exit 1
+              }
 
       - run: python -m pytest
 
@@ -60,6 +101,12 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq gawk mawk ripgrep
       - run: pip install -e .
+
+      - name: every engine can answer here too
+        # Same vacuity risk as the test job: every assertion below is about what
+        # the engines did, and an absent engine cannot disagree with anything.
+        # Witnessed by the two controls in the test job.
+        run: regexdrift --list-engines | grep -qxF '10 of 10 engines can answer here.'
 
       # `code=0; cmd || code=$?` rather than `cmd; code=$?`, because these steps
       # run under `bash -e` and finding drift is an exit 1 on purpose.

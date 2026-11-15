@@ -34,15 +34,29 @@ from regexdrift.engines import (
 BASELINE = ["grep", "grep -E", "sed", "python"]
 
 
-def test_the_baseline_engines_are_present():
+def test_the_baseline_engines_can_answer():
     """grep, sed and python are on every machine this could run on.
 
     If this fails, the rest of the suite is skipping rather than passing, and a
     green tick would mean nothing at all. This is the guard that stops the
     per-engine skips from being a way to accidentally test zero engines.
+
+    Readiness rather than `available()`, which is where this used to look: on a
+    grep with no PCRE the two answers differ, and the skips now follow readiness
+    too, so a check meant to stop them hollowing out the suite has to ask the
+    same question they do.
+
+    It doubles as the check on PROBE_PATTERN itself. All four of these engines
+    accept one literal character under any build, so a failure here is either a
+    box with no grep or a probe that has stopped being neutral -- and the second
+    would make every unusable verdict in the tool wrong. The matching claim
+    about all ten engines belongs in CI, which controls what is installed; here
+    it would fail on any Mac, where BSD grep has no -P and the right answer is
+    to skip those tests rather than to fail.
     """
-    missing = [name for name in BASELINE if not BY_NAME[name].available()]
-    assert not missing, f"baseline engines missing: {missing}"
+    unready = [(name, BY_NAME[name].readiness()) for name in BASELINE]
+    unready = [row for row in unready if row[1][0] is not Readiness.READY]
+    assert unready == [], f"baseline engines cannot answer: {unready}"
 
 
 def test_parse_numbers_reads_both_output_shapes():
@@ -190,20 +204,6 @@ def test_awk_program_text_contains_no_interpolation():
 # exiting 2, which this adapter reads as a refusal, so PCRE2 being absent was
 # reported as PCRE2 refusing the pattern -- agreement among the rest, and the
 # dialect the tool exists to contrast against POSIX silently out of the room.
-
-
-def test_every_engine_on_path_can_answer_the_probe():
-    """PROBE_PATTERN has to be acceptable to every dialect or it decides nothing.
-
-    If this fails, the probe itself is the finding: an engine is being called
-    unusable because of the pattern it was asked, not because of what it is. It
-    is asserted over whatever is installed here rather than a fixed list, so it
-    gets stronger on a machine with more engines and never weaker.
-    """
-    asked = [e for e in ENGINES if e.available()]
-    assert asked, "no engines on PATH at all, so this asserts nothing"
-    not_ready = [(e.name, e.readiness()) for e in asked if e.readiness()[0] is not Readiness.READY]
-    assert not_ready == [], f"the probe {PROBE_PATTERN!r} is not universally acceptable: {not_ready}"
 
 
 def test_a_mode_the_binary_does_not_have_is_unavailable_not_a_refusal(grep_without_pcre, write_lines):

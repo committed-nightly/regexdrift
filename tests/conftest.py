@@ -75,12 +75,21 @@ def grep_without_pcre(monkeypatch):
     because the shim is about to *be* the grep on PATH and would otherwise
     re-exec itself.
     """
-    real = shutil.which("grep")
-    if real is None:
-        pytest.skip("no grep to wrap")
     shim = SHIM_ROOT / "grep-without-pcre"
     if not os.access(shim / "grep", os.X_OK):
         pytest.skip(f"{shim / 'grep'} is not executable")
+    # The shim directory is excluded when resolving the real grep, because the
+    # shim may already be on PATH -- running the suite under one was how this was
+    # found, and a shim that execs itself recurses until the 10s timeout, ten
+    # times over, and reports plain `grep` as unusable.
+    elsewhere = os.pathsep.join(
+        entry
+        for entry in os.environ.get("PATH", "").split(os.pathsep)
+        if entry and Path(entry).resolve() != shim.resolve()
+    )
+    real = shutil.which("grep", path=elsewhere)
+    if real is None:
+        pytest.skip("no grep to wrap")
     monkeypatch.setenv("SHIM_REAL_GREP", real)
     monkeypatch.setenv("PATH", f"{shim}{os.pathsep}{os.environ['PATH']}")
     return shim

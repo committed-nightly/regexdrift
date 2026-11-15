@@ -18,4 +18,16 @@ for arg in "$@"; do
       ;;
   esac
 done
-exec "${SHIM_REAL_GREP:-/usr/bin/grep}" "$@"
+real="${SHIM_REAL_GREP:-/usr/bin/grep}"
+
+# Refuse to exec ourselves. Without this, a SHIM_REAL_GREP that resolves back
+# here recurses until regexdrift's 10s timeout, once per engine, and the symptom
+# is plain `grep` being reported unusable -- which is a long way from the cause.
+case "$(cd "$(dirname "$real")" 2>/dev/null && pwd)/$(basename "$real")" in
+  "$(cd "$(dirname "$0")" && pwd)/$(basename "$0")")
+    echo "$0: SHIM_REAL_GREP points back at this shim" >&2
+    exit 125
+    ;;
+esac
+
+exec "$real" "$@"

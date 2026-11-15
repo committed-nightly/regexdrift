@@ -37,6 +37,23 @@ exits 0 whether or not a line matched -- so for sed the presence of output is th
 match and a non-zero exit is the refusal. Conflating the two would turn the
 loudest, most useful outcome in this tool (ripgrep rejecting a backreference
 outright) into a silent empty result.
+
+And a fourth, which the first version of this file got wrong. **An engine
+refusing a pattern is not the same as an engine that cannot run.** Three of the
+ten entries below -- `grep -E`, `grep -P`, `sed -E` -- are modes of a binary
+rather than binaries, and `shutil.which` cannot see a mode. PCRE support is a
+compile-time option in GNU grep and absent from BSD and busybox grep entirely,
+so on those boxes `grep -P` is on PATH, is not there, and said so by exiting 2:
+
+    $ busybox grep -P -e 'a' /dev/null
+    grep: invalid option -- 'P'
+
+Exit 2 is this file's definition of a refusal, so PCRE2 -- missing -- was
+reported as PCRE2 having an opinion about your pattern. The fix is the same
+move as everything else here: ask the engine. On any refusal the adapter asks
+again with `PROBE_PATTERN`, which every dialect in the list compiles. An engine
+that will not take that one will not take any, so it is UNAVAILABLE and named
+as such; an engine that takes it has genuinely refused what you asked.
 """
 
 from __future__ import annotations
@@ -50,6 +67,18 @@ from enum import Enum
 
 TIMEOUT_SECONDS = 10
 
+# A pattern every dialect in ENGINES compiles: one literal character, no
+# quantifier, no class, no escape. BRE, ERE, PCRE2, awk's ERE, Python `re`,
+# ECMAScript and Rust's regex all take it, so an engine that refuses it is not
+# disagreeing about syntax -- it cannot answer at all.
+PROBE_PATTERN = "a"
+
+# The probe is asked against os.devnull rather than the caller's input: it is
+# always readable, needs no temp file, and costs no read. Matching nothing is
+# still a compiled pattern, which is the only thing being established here --
+# grep and rg exit 1, sed and awk exit 0, and all four mean "accepted".
+PROBE_PATH = os.devnull
+
 # Characters tried as a sed address delimiter, in order. None of them mean
 # anything to a POSIX regex, so wrapping a pattern in one cannot change how the
 # pattern is read -- and one absent from the pattern needs no escaping inside it.
@@ -60,15 +89,47 @@ class Status(Enum):
     """What came back from an engine.
 
     ACCEPTED covers "compiled the pattern and matched nothing", which is an
-    answer. REJECTED is the engine saying no. UNAVAILABLE is nobody having
-    looked, and is never folded into either of the others -- a tool that reports
-    agreement because half the engines were missing is the failure this whole
-    shop exists to find.
+    answer. REJECTED is the engine saying no to the pattern you asked about.
+    UNAVAILABLE is no answer being obtainable, for any of three reasons: the
+    binary is not on PATH, the pattern leaves sed no delimiter, or the binary is
+    there and this mode of it is not (see the module docstring). It is never
+    folded into either of the others -- a tool that reports agreement because
+    half the engines were missing is the failure this whole shop exists to find,
+    and one that files a missing engine as a refusal is the same failure wearing
+    a hat.
     """
 
     ACCEPTED = "accepted"
     REJECTED = "rejected"
     UNAVAILABLE = "unavailable"
+
+
+class Readiness(Enum):
+    """Whether an engine can be asked anything at all, which is three states.
+
+    `--list-engines` reported two of these for its first two months, by calling
+    `shutil.which` and printing the answer as "installed". MISSING and UNUSABLE
+    are both "you will get no answer from this engine", but they need different
+    things doing about them -- one is a package to install, the other is a grep
+    that will never have PCRE no matter what you install -- so they are not one
+    state with two messages.
+    """
+
+    READY = "ready"
+    MISSING = "missing"
+    UNUSABLE = "unusable"
+
+
+def first_complaint(binary: str, text: str) -> str:
+    """The first line of what an engine said, without it re-introducing itself.
+
+    Every engine here prefixes its errors with its own name, and the report has
+    already named the engine in the column to the left, so `grep -P: grep:
+    invalid option` reads as a stutter.
+    """
+    first = text.splitlines()[0] if text else ""
+    prefix = f"{binary}: "
+    return first[len(prefix):] if first.startswith(prefix) else first
 
 
 @dataclass(frozen=True)
@@ -80,6 +141,10 @@ class Result:
     matched: frozenset[int] = frozenset()
     message: str = ""
     warning: str = ""
+    # A timeout is a real property of this pattern on this engine, so it stays a
+    # refusal and is never re-asked as a readiness question. Without the flag the
+    # probe would have to recognise the timeout by its message text.
+    timed_out: bool = False
 
     @property
     def accepted(self) -> bool:
@@ -106,12 +171,61 @@ class Engine:
     grep_exit_convention: bool = True
 
     def available(self) -> bool:
+        """Whether the binary is on PATH.
+
+        Not whether this engine can answer -- `grep -P` and `grep` share a
+        binary and do not share PCRE support. Use `readiness` for that question;
+        this is only the cheap half of it.
+        """
         return shutil.which(self.binary) is not None
 
+    def readiness(self) -> tuple[Readiness, str]:
+        """Whether this engine can answer, and if not, why not.
+
+        Costs one subprocess per engine when it gets past PATH, which is what it
+        takes to know: the only authority on whether this grep has PCRE is this
+        grep.
+        """
+        if not self.available():
+            return Readiness.MISSING, f"{self.binary} is not on PATH"
+        probe = self._attempt(PROBE_PATTERN, PROBE_PATH)
+        if probe.status is Status.REJECTED:
+            return Readiness.UNUSABLE, self._unusable(probe)
+        if probe.status is Status.UNAVAILABLE:
+            # which() said yes and the exec said no: a binary deleted between the
+            # two calls. Rare, and reporting it as ready would be a lie.
+            return Readiness.MISSING, probe.message
+        return Readiness.READY, ""
+
+    def _unusable(self, probe: Result) -> str:
+        """Why a refusal of PROBE_PATTERN is a verdict on the engine.
+
+        Quotes the pattern, because the claim is only as good as the pattern
+        being uncontroversial and the reader should be able to check it.
+        """
+        why = first_complaint(self.binary, probe.message) or "no reason given"
+        return f"{self.binary} is on PATH but refused {PROBE_PATTERN!r}, which every dialect takes: {why}"
+
     def run(self, pattern: str, path: str) -> Result:
+        """This engine's answer, or the reason there is not one.
+
+        A refusal is re-asked once, with `PROBE_PATTERN`. That turns the one
+        state this adapter could not previously name -- the mode its binary does
+        not have -- from a refusal into UNAVAILABLE, at the cost of a second
+        subprocess on a path that was already failing.
+        """
         if not self.available():
             return Result(self.name, Status.UNAVAILABLE, message=f"{self.binary} is not on PATH")
 
+        result = self._attempt(pattern, path)
+        if result.status is Status.REJECTED and not result.timed_out:
+            probe = self._attempt(PROBE_PATTERN, PROBE_PATH)
+            if probe.status is Status.REJECTED:
+                return Result(self.name, Status.UNAVAILABLE, message=self._unusable(probe))
+        return result
+
+    def _attempt(self, pattern: str, path: str) -> Result:
+        """Run the engine once and read its exit status. No interpretation."""
         argv = self._argv(pattern, path)  # type: ignore[operator]
         if argv is None:
             return Result(
@@ -141,6 +255,7 @@ class Engine:
                 self.name,
                 Status.REJECTED,
                 message=f"did not finish within {TIMEOUT_SECONDS}s",
+                timed_out=True,
             )
 
         stderr = proc.stderr.strip()
@@ -323,7 +438,23 @@ def select_engines(names: list[str] | None = None) -> list[Engine]:
 
 
 def installed(engines: list[Engine]) -> list[Engine]:
+    """Those whose binary is on PATH. A PATH check, not a readiness check.
+
+    Used only to answer "is it worth starting at all", where the cheap question
+    is the right one: an engine that is on PATH but has no usable mode comes back
+    UNAVAILABLE from `run` and is excluded from the comparison there, so it
+    cannot reach a verdict either way.
+    """
     return [engine for engine in engines if engine.available()]
+
+
+def readiness(engines: list[Engine] | None = None) -> list[tuple[Engine, Readiness, str]]:
+    """Ask every engine whether it can answer. One subprocess each, at most."""
+    rows = []
+    for engine in engines or ENGINES:
+        state, detail = engine.readiness()
+        rows.append((engine, state, detail))
+    return rows
 
 
 def run_all(pattern: str, path: str, engines: list[Engine] | None = None) -> list[Result]:

@@ -13,6 +13,7 @@ import pytest
 from conftest import requires
 
 from regexdrift.cli import EXIT_DRIFT, EXIT_ERROR, EXIT_OK, main
+from regexdrift.engines import ENGINES, PROBE_PATTERN, SED_DELIMITERS
 
 
 @requires("grep", "grep -E")
@@ -130,10 +131,15 @@ def test_strict_fails_on_a_refusal():
 
 
 def test_uninstalled_engines_are_named_in_the_output(capsys, monkeypatch):
-    """The failure this whole shop is about: a check that compared four of ten."""
+    """The failure this whole shop is about: a check that compared four of ten.
+
+    Asserted on the whole `not run` line rather than on the word "sed", which
+    appears in that report for several other reasons.
+    """
     monkeypatch.setattr("shutil.which", lambda binary: None if binary == "sed" else "/usr/bin/x")
     main(["hello", "--engine", "grep", "--engine", "grep -E", "--engine", "sed"])
-    assert "sed" in capsys.readouterr().out
+    lines = [line.strip() for line in capsys.readouterr().out.splitlines()]
+    assert "not run   sed: sed is not on PATH" in lines
 
 
 def test_no_engines_installed_is_an_error(capsys, monkeypatch):
@@ -160,11 +166,90 @@ def test_json_has_no_notes_without_drift(capsys):
     assert json.loads(capsys.readouterr().out)["notes"] == []
 
 
-def test_list_engines_says_which_are_installed(capsys):
+def test_list_engines_accounts_for_every_engine(capsys):
+    """Every engine gets a state from the known set, and the counts add up.
+
+    This asserted `"installed" in out or "missing" in out` over the whole
+    output, which is the logbook#63 shape: an or of two substrings anywhere in a
+    report, true on any box for reasons that have nothing to do with the claim.
+    It stayed green after `installed` was removed from the per-engine column,
+    because the summary line says "installed but unusable".
+    """
     assert main(["--list-engines"]) == EXIT_OK
     out = capsys.readouterr().out
-    assert "grep" in out and "rg" in out
-    assert "installed" in out or "missing" in out
+    states = {}
+    for engine in ENGINES:
+        rows = [line for line in out.splitlines() if line.strip().startswith(f"{engine.name}  ")]
+        assert len(rows) == 1, f"{engine.name} appears on {len(rows)} rows"
+        tail = rows[0].split(engine.dialect, 1)[1].strip()
+        states[engine.name] = tail.split(" —", 1)[0].strip()
+    assert set(states) == {engine.name for engine in ENGINES}
+    assert set(states.values()) <= {"ready", "missing", "unusable"}, states
+    ready = sum(1 for state in states.values() if state == "ready")
+    assert f"{ready} of {len(ENGINES)} engines can answer here." in out
+
+
+def test_list_engines_prints_what_it_measured_with(capsys):
+    """A readiness claim that does not say how it was measured is worth less."""
+    main(["--list-engines"])
+    out = capsys.readouterr().out
+    assert f"asking each engine for {PROBE_PATTERN!r}" in out
+    assert "can still refuse your pattern" in out
+
+
+def test_list_engines_marks_a_mode_the_binary_lacks_as_unusable(capsys, grep_without_pcre):
+    """End to end: the state shutil.which cannot see, through the CLI."""
+    assert main(["--list-engines"]) == EXIT_OK
+    out = capsys.readouterr().out
+    row = next(line for line in out.splitlines() if line.strip().startswith("grep -P  "))
+    assert "unusable" in row
+    assert "-P" in row
+    for name in ("grep  ", "grep -E  "):
+        other = next(line for line in out.splitlines() if line.strip().startswith(name))
+        assert "ready" in other, other
+    assert "1 installed but unusable." in out
+
+
+@requires("grep", "python")
+def test_not_run_gives_an_installed_engine_its_own_reason(capsys):
+    """sed is installed and cannot take this pattern. Those are different things.
+
+    The pattern uses every character sed could have used as an address
+    delimiter, so there is none left and sed is unavailable for this one pattern
+    -- which the report used to print as "(not installed)".
+    """
+    pattern = "a" + "b".join(SED_DELIMITERS)
+    assert all(character in pattern for character in SED_DELIMITERS)
+    main([pattern, "--engine", "sed", "--engine", "grep", "--engine", "python"])
+    lines = [line.strip() for line in capsys.readouterr().out.splitlines()]
+    assert "not run   sed: no delimiter available for this pattern" in lines
+    assert not any("not installed" in line for line in lines)
+
+
+@requires("grep", "python")
+def test_json_not_run_carries_the_reason(capsys):
+    pattern = "a" + "b".join(SED_DELIMITERS)
+    main([pattern, "--engine", "sed", "--engine", "grep", "--engine", "python", "--json"])
+    payload = json.loads(capsys.readouterr().out)
+    assert "not_installed" not in payload
+    assert payload["not_run"] == [
+        {"engine": "sed", "reason": "no delimiter available for this pattern"}
+    ]
+
+
+def test_an_unusable_mode_is_not_counted_as_agreement(capsys, grep_without_pcre):
+    r"""The consequence the whole fix is for.
+
+    `\d` is the tool's headline case: PCRE2 and Python match digits, grep and
+    sed match the letter d. With no PCRE in grep, grep -P must appear under
+    `not run` and never inside a group, because a group it joined would be a
+    claim that PCRE2 behaved that way here.
+    """
+    main([r"\d", "--engine", "grep", "--engine", "grep -P", "--engine", "python"])
+    out = capsys.readouterr().out
+    groups = out.split("not run")[0]
+    assert "grep -P" not in groups, groups
+    assert "not run   grep -P" in out
 
 
 def test_a_pattern_is_required(capsys):

@@ -250,6 +250,26 @@ def test_a_real_refusal_is_not_turned_into_unavailability(write_lines):
         assert result.message
 
 
+@requires("python")
+def test_a_python_refusal_says_what_re_objected_to(write_lines):
+    """A refusal has to carry the engine's reason, not the shape of its failure.
+
+    The adapter runs `python -c` and reads back stderr, so an uncaught
+    `re.error` made the first line of the refusal "Traceback (most recent call
+    last):" -- a true sentence about the subprocess and no help at all about the
+    pattern. The status was never wrong, which is why it survived: the report
+    had a `refused` row for python with a reason that could not be acted on,
+    sitting directly under grep -P naming its own objection to the same pattern.
+    """
+    path = write_lines(["cat"])
+    result = BY_NAME["python"].run(r"\ycat\y", path)
+    assert result.status is Status.REJECTED
+    assert "bad escape" in result.message, result.message
+    assert not result.message.startswith("Traceback")
+    # What the report actually prints, which is the line that was wrong.
+    assert "Traceback" not in first_complaint(BY_NAME["python"].binary, result.message)
+
+
 def test_readiness_names_the_binary_it_could_not_find(monkeypatch):
     monkeypatch.setattr("shutil.which", lambda binary: None)
     state, detail = BY_NAME["rg"].readiness()

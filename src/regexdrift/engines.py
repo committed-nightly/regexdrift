@@ -317,9 +317,23 @@ def _sed_argv(flag: str | None):
 # amount of punctuation in it can become part of the program.
 _AWK_PROGRAM = 'BEGIN{p=ENVIRON["REGEXDRIFT_PATTERN"]} $0 ~ p {print FNR}'
 
+# The compile is guarded, because an uncaught `re.error` exits non-zero with a
+# traceback and `first_complaint` reads the first line of stderr -- which for a
+# traceback is "Traceback (most recent call last):". The status was right and the
+# reason was not: nine engines say what they objected to, and this one reported
+# the shape of its own failure. `regexdrift '\ycat\y'` printed
+#
+#     refused   grep -P: unrecognized character follows \
+#     refused   python: Traceback (most recent call last):
+#
+# Exit 2 because that is the "could not" end of the grep convention, though this
+# adapter is sed-style and reads any non-zero as a refusal.
 _PYTHON_PROGRAM = (
     "import re,sys\n"
-    "p=re.compile(sys.argv[1])\n"
+    "try:\n"
+    "    p=re.compile(sys.argv[1])\n"
+    "except re.error as exc:\n"
+    "    print(exc, file=sys.stderr); sys.exit(2)\n"
     "for n,line in enumerate(open(sys.argv[2],encoding='utf-8',newline='').read().splitlines(),1):\n"
     "    if p.search(line): print(n)\n"
 )

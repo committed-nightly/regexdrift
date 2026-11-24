@@ -134,6 +134,53 @@ jobs:
           regexdrift '[0-9][0-9]*%'
           regexdrift '^[a-z_][a-z0-9_]*$'
 
+      - name: a refused pattern says which construct was refused
+        # logbook#80, and the gap that let it live two months: nothing in this
+        # job had ever read a refused row. `(a` is the pattern that does it in
+        # one run -- eight of the ten engines refuse it, including all four
+        # whose reason was not where the report was looking.
+        #
+        # It exits 0, because the two engines that accept it (BRE, where `(` is
+        # a literal) agree. So a step asserting only on the exit code would
+        # pass with every refused row reading `[eval]:1`, which is what the old
+        # one would have done if there had been one.
+        run: |
+          printf 'aa\nab\n' > corpus.txt
+          regexdrift '(a' corpus.txt > out.txt
+          cat out.txt
+
+          # The denominator first, so the per-engine assertions below cannot be
+          # passing over an empty block -- the shape logbook#64 spent twelve
+          # entries pulling out of this org's CI. Add an engine that refuses
+          # this pattern and the count goes red rather than quiet.
+          refused=$(grep -c '^  refused   ' out.txt)
+          test "$refused" -eq 8 || { echo "expected 8 refused rows, got $refused"; cat out.txt; exit 1; }
+
+          # Anchored on the engine, so each claim is about that engine's row,
+          # and matched on the construct rather than the whole sentence: the
+          # wording belongs to the engine's version and a node or ripgrep bump
+          # should not turn this red. The four here are the four that were
+          # wrong -- node reported the location of its throw, gawk the input
+          # filename, sed a character offset into this tool's own wrapping, and
+          # ripgrep a header four lines above the answer.
+          grep -q '^  refused   node: .*Unterminated group' out.txt || { echo 'node did not name the construct'; exit 1; }
+          grep -q '^  refused   gawk: invalid regexp: Unmatched' out.txt || { echo 'gawk did not name the construct'; exit 1; }
+          grep -q '^  refused   sed -E: Unmatched' out.txt || { echo 'sed -E did not name the construct'; exit 1; }
+          grep -q '^  refused   rg: unclosed group' out.txt || { echo 'rg did not name the construct'; exit 1; }
+
+          # The README's own example of the loud kind of refusal. Exits 1 here
+          # because the engines that do accept a backreference disagree about
+          # it, which is the drift the tool is named for.
+          code=0; regexdrift '(a)\1' corpus.txt > backref.txt || code=$?
+          test "$code" -eq 1 || { echo "expected exit 1, got $code"; cat backref.txt; exit 1; }
+          cat backref.txt
+          grep -qxF '  refused   rg: backreferences are not supported' backref.txt || { echo 'ripgrep did not name backreferences'; exit 1; }
+
+          # --strict is the documented way to make a refusal fail a build, and
+          # it has never been run in CI either.
+          code=0; regexdrift '(a' corpus.txt --strict > /dev/null || code=$?
+          test "$code" -eq 1 || { echo "--strict on 8 refusals should exit 1, got $code"; exit 1; }
+
       - name: a missing engine is named, never dropped
         run: |
           regexdrift 'hello' --engine grep --engine 'grep -E' --json \

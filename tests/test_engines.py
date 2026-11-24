@@ -270,6 +270,53 @@ def test_a_python_refusal_says_what_re_objected_to(write_lines):
     assert "Traceback" not in first_complaint(BY_NAME["python"].binary, result.message)
 
 
+@requires("node")
+def test_a_node_refusal_says_what_the_regexp_engine_objected_to(write_lines):
+    """The same bug as python's, and it hid behind being louder rather than quieter.
+
+    python's uncaught `re.error` put "Traceback (most recent call last):" on the
+    first line. node's uncaught throw puts the *location* there -- `[eval]:1` --
+    and the report prints the first line, so the refused row read
+
+        refused   node: [eval]:1
+
+    which names neither the construct nor the fact that a regex was involved.
+    One of nine engines whose answer was a column width's worth of nothing.
+
+    Two things are asserted separately because they failed for different
+    reasons. The reason has to be there, and `[eval]` and the stack frames have
+    to not be -- the sixteen-line report quoted this program back in full on
+    line two, so `refused node:` was a channel for regexdrift's own source.
+    """
+    path = write_lines(["aa"])
+    result = BY_NAME["node"].run("(a", path)
+    assert result.status is Status.REJECTED
+    assert "Unterminated group" in result.message, result.message
+    assert "[eval]" not in result.message, result.message
+    assert "require('fs')" not in result.message, result.message
+    assert "\n" not in result.message.strip(), f"still multi-line: {result.message!r}"
+    # What the report prints, which is the line that was wrong.
+    visible = first_complaint(BY_NAME["node"].binary, result.message)
+    assert "Unterminated group" in visible, visible
+
+
+@requires("node")
+def test_node_still_answers_normally_after_the_guard(write_lines):
+    """The guard is in the same program text that does the matching.
+
+    A `try` that caught the compile and then fell through to `re.test` with an
+    undefined `re` would turn every *accepted* pattern into a refusal, and the
+    refusal tests above would all still pass. So the accepting path is pinned
+    here, including stderr staying empty: node's silence is what makes gawk the
+    only engine in the README's example that warns.
+    """
+    path = write_lines(["a", "b", "a"])
+    result = BY_NAME["node"].run("a", path)
+    assert result.status is Status.ACCEPTED, result.message
+    assert result.matched == {1, 3}
+    assert result.warning == ""
+
+
 def test_readiness_names_the_binary_it_could_not_find(monkeypatch):
     monkeypatch.setattr("shutil.which", lambda binary: None)
     state, detail = BY_NAME["rg"].readiness()

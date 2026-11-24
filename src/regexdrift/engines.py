@@ -54,11 +54,37 @@ move as everything else here: ask the engine. On any refusal the adapter asks
 again with `PROBE_PATTERN`, which every dialect in the list compiles. An engine
 that will not take that one will not take any, so it is UNAVAILABLE and named
 as such; an engine that takes it has genuinely refused what you asked.
+
+And a fifth. **Knowing an engine refused is not the same as knowing what it
+refused**, and for four of the ten the answer is not on the first line of
+stderr. The report printed the first line, so:
+
+    refused   rg: regex parse error:
+    refused   node: [eval]:1
+
+ripgrep's header sits four lines above the construct. node's uncaught throw
+reports the location and nothing else, with this file's own program text on the
+line below. gawk leads with the input file and the record number, which is
+about the run. Both seds count a character offset into the `\cPATc=` this
+module wraps the pattern in, so the number is precise and is about a string the
+caller never wrote.
+
+Two different fixes, and the difference matters. node and python are programs
+this file writes, so the compile is guarded there and the engine is made to say
+one useful line -- no extraction, nothing to keep in step with a future version.
+The other three are binaries whose output is theirs, so each carries its own
+rule for where the reason is (`Engine.complaint`), and a rule that does not
+recognise what it was handed falls back to the first line rather than to
+nothing. That is the only interpretation anywhere in this file, it is over prose
+rather than over a regex, and `REFUSALS` in tests/test_dialects.py holds all ten
+engines to naming their construct so a reworded message is caught rather than
+quietly swallowed.
 """
 
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -132,6 +158,76 @@ def first_complaint(binary: str, text: str) -> str:
     return first[len(prefix):] if first.startswith(prefix) else first
 
 
+# ripgrep's first line is a header. The construct it refused is on a line of its
+# own, four lines down, and the two between hold the pattern and a caret rule:
+#
+#     rg: regex parse error:
+#         (?:(a)\1)
+#               ^^
+#     error: backreferences are not supported
+#
+# So the one engine in the list whose refusals are the loudest -- and the one the
+# README quotes as a thing the tool is opinionated about -- reported them as
+# `regex parse error:`, which is also what a typo looks like.
+_RG_REASON = "error: "
+
+
+def _rg_complaint(binary: str, text: str) -> str:
+    for line in text.splitlines():
+        if line.startswith(_RG_REASON):
+            return line[len(_RG_REASON):]
+    return ""
+
+
+# gawk prefixes the reason with where it was when it hit it, including the input
+# file and the record number:
+#
+#     gawk: cmd. line:1: (FILENAME=<input> FNR=1) fatal: invalid regexp: Unmatched ( or \(: /(a/
+#
+# The leading two thirds of that is about the run and not about the pattern, and
+# the file it names is the scratch file the CLI made -- which is why `_tidy`
+# exists to rewrite it to `<input>` before anything can print it. Cutting at the
+# severity keeps every word gawk said about the regex and drops the bookkeeping.
+#
+# The same cut applies to warnings, which is how `regexdrift '\d'` comes to print
+# the line the README has claimed since the first commit:
+#
+#     before   warned    gawk: cmd. line:1: (FILENAME=<input> FNR=1) warning: regexp escape sequence `\d' is not a known regexp operator
+#     after    warned    gawk: regexp escape sequence `\d' is not a known regexp operator
+_AWK_SEVERITIES = (" fatal: ", " warning: ")
+
+
+def _awk_complaint(binary: str, text: str) -> str:
+    # The earliest severity marker, because gawk echoes the pattern after the
+    # reason and a pattern is allowed to contain the word "fatal".
+    first = first_complaint(binary, text)
+    found = sorted((first.find(marker), marker) for marker in _AWK_SEVERITIES if marker in first)
+    if not found:
+        return ""
+    at, marker = found[0]
+    return first[at + len(marker):]
+
+
+# sed is handed the pattern wrapped in `\cPATc=` (see the module docstring), so
+# the character offset in its complaint counts into a string the caller never
+# wrote and is wrong about the one they did:
+#
+#     pattern  (a)\1                     5 characters
+#     sed saw  \%(a)\1%=                 9 characters
+#     sed said -e expression #1, char 8: Invalid back reference
+#
+# Character 8 of the caller's pattern does not exist. A number that precise and
+# that wrong is worse than no number, and `-e expression #1` is about sed's
+# argument handling rather than about the regex.
+_SED_BOOKKEEPING = re.compile(r"^-e expression #\d+, char \d+: ")
+
+
+def _sed_complaint(binary: str, text: str) -> str:
+    first = first_complaint(binary, text)
+    stripped = _SED_BOOKKEEPING.sub("", first, count=1)
+    return stripped if stripped != first else ""
+
+
 @dataclass(frozen=True)
 class Result:
     """One engine's answer about one pattern and one set of lines."""
@@ -169,6 +265,34 @@ class Engine:
     # grep-style: 0 matched, 1 matched nothing, >=2 could not. sed-style: any
     # non-zero is a refusal and no output means no matches.
     grep_exit_convention: bool = True
+    # How to find the reason in what this engine wrote, where the default -- the
+    # first line, minus the engine's own name -- is not it. Four of the ten need
+    # one; see `complaint`.
+    _complaint: object = field(default=None, repr=False)
+
+    def complaint(self, text: str) -> str:
+        """What this engine said about the pattern, without its bookkeeping.
+
+        The default is `first_complaint`, and for six of the ten engines the
+        first line of stderr *is* the reason -- including mawk, whose first line
+        names the construct and whose second and third are the echoed pattern
+        and a FILENAME, correctly dropped. The other four bury it: ripgrep under
+        a header, gawk behind an input filename and a record number, and both
+        seds behind a character offset into a string the caller never wrote.
+
+        Reading error text per engine is the one place this tool interprets
+        rather than asks, and it is not the subject -- nothing here reads a
+        regex, only the prose an engine wrote around one. The risk is wording
+        that changes between versions, so an extractor that does not recognise
+        what it was given returns "" and the first line is used instead. That
+        makes the failure mode of a reworded message today's output rather than
+        an empty column, and a per-engine refusal test goes red to say so.
+        """
+        if self._complaint is not None:
+            reason = self._complaint(self.binary, text)  # type: ignore[operator]
+            if reason:
+                return reason
+        return first_complaint(self.binary, text)
 
     def available(self) -> bool:
         """Whether the binary is on PATH.
@@ -203,7 +327,7 @@ class Engine:
         Quotes the pattern, because the claim is only as good as the pattern
         being uncontroversial and the reader should be able to check it.
         """
-        why = first_complaint(self.binary, probe.message) or "no reason given"
+        why = self.complaint(probe.message) or "no reason given"
         return f"{self.binary} is on PATH but refused {PROBE_PATTERN!r}, which every dialect takes: {why}"
 
     def run(self, pattern: str, path: str) -> Result:
@@ -338,9 +462,25 @@ _PYTHON_PROGRAM = (
     "    if p.search(line): print(n)\n"
 )
 
+# Guarded for the same reason python's is, and it was missed because node's
+# failure is louder rather than quieter. An uncaught `new RegExp` throws, and
+# node's uncaught-exception report is sixteen lines that open with the location:
+#
+#     refused   node: [eval]:1
+#
+# which names nothing at all -- not the construct, not even that the subject was
+# a regex. The reason is on line five, and lines two and three are this program
+# text and a caret, so the report was also pasting regexdrift's own source into
+# whatever read it. `err.message` is one line and says which construct:
+# "Invalid regular expression: /(a/: Unterminated group".
+#
+# Exit 2 to match python's adapter, though both are sed-style here and any
+# non-zero reads as a refusal.
 _NODE_PROGRAM = (
     "const fs=require('fs');"
-    "const re=new RegExp(process.argv[1]);"
+    "let re;"
+    "try{re=new RegExp(process.argv[1])}"
+    "catch(err){console.error(err.message);process.exit(2)}"
     "const text=fs.readFileSync(process.argv[2],'utf8');"
     "const lines=text.split('\\n');"
     "if(lines.length&&lines[lines.length-1]==='')lines.pop();"
@@ -377,6 +517,7 @@ ENGINES: list[Engine] = [
         binary="sed",
         _argv=_sed_argv(None),
         grep_exit_convention=False,
+        _complaint=_sed_complaint,
     ),
     Engine(
         name="sed -E",
@@ -384,6 +525,7 @@ ENGINES: list[Engine] = [
         binary="sed",
         _argv=_sed_argv("-E"),
         grep_exit_convention=False,
+        _complaint=_sed_complaint,
     ),
     Engine(
         name="gawk",
@@ -392,6 +534,7 @@ ENGINES: list[Engine] = [
         _argv=lambda p, path: ["gawk", _AWK_PROGRAM, path],
         _env=_awk_env,
         grep_exit_convention=False,
+        _complaint=_awk_complaint,
     ),
     Engine(
         name="mawk",
@@ -433,6 +576,7 @@ ENGINES: list[Engine] = [
             p,
             path,
         ],
+        _complaint=_rg_complaint,
     ),
 ]
 

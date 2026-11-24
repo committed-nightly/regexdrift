@@ -96,8 +96,10 @@ Exit codes, so it can fail a build:
 | 2 | fewer than two engines could answer, so nothing was compared |
 
 `--strict` also fails on an engine refusing the pattern or warning about it.
-`--json` for machine-readable output. `--engine NAME` to narrow it down, which is
-the flag to reach for when the real question is "does this work in *awk*".
+`--json` for machine-readable output, where a refusal carries both the `reason`
+the report prints and the engine's whole `message`. `--engine NAME` to narrow it
+down, which is the flag to reach for when the real question is "does this work in
+*awk*".
 
 ## Engines
 
@@ -157,9 +159,26 @@ standards, would disagree with a real engine somewhere — and being confidently
 wrong about exactly this is the one thing the tool cannot afford.
 
 **A refusal is not a disagreement.** ripgrep rejecting a backreference exits 2 and
-prints a parse error; you will find out. The drift in the name is the quiet kind,
-where every engine exits 0 and two of them return different lines. Refusals are
-reported in full and do not set the exit code unless you pass `--strict`.
+names the construct, so you find out:
+
+```console
+$ regexdrift '(a)\1' input.txt
+  refused   grep: Invalid back reference
+  refused   sed: Invalid back reference
+  refused   rg: backreferences are not supported
+```
+
+The drift in the name is the quiet kind, where every engine exits 0 and two of
+them return different lines. A refusal does not set the exit code unless you pass
+`--strict`.
+
+Getting that line right is per-engine work, because for four of the ten the reason
+is not the first thing they print. ripgrep puts a `regex parse error:` header four
+lines above the construct. gawk leads with the input filename and the record
+number. Both seds report a character offset counted into the `\cPATc` wrapping
+this tool applies, so the number is about a string you did not write. `--json`
+keeps what each engine said whole, under `message`, with the extracted `reason`
+beside it.
 
 **The explanations only appear once a difference has been measured.** There is a
 short list of notes about `\d`, backreferences, lazy quantifiers and the rest, and

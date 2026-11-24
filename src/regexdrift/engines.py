@@ -54,6 +54,31 @@ move as everything else here: ask the engine. On any refusal the adapter asks
 again with `PROBE_PATTERN`, which every dialect in the list compiles. An engine
 that will not take that one will not take any, so it is UNAVAILABLE and named
 as such; an engine that takes it has genuinely refused what you asked.
+
+And a fifth. **Knowing an engine refused is not the same as knowing what it
+refused**, and for four of the ten the answer is not on the first line of
+stderr. The report printed the first line, so:
+
+    refused   rg: regex parse error:
+    refused   node: [eval]:1
+
+ripgrep's header sits four lines above the construct. node's uncaught throw
+reports the location and nothing else, with this file's own program text on the
+line below. gawk leads with the input file and the record number, which is
+about the run. Both seds count a character offset into the `\cPATc=` this
+module wraps the pattern in, so the number is precise and is about a string the
+caller never wrote.
+
+Two different fixes, and the difference matters. node and python are programs
+this file writes, so the compile is guarded there and the engine is made to say
+one useful line -- no extraction, nothing to keep in step with a future version.
+The other three are binaries whose output is theirs, so each carries its own
+rule for where the reason is (`Engine.complaint`), and a rule that does not
+recognise what it was handed falls back to the first line rather than to
+nothing. That is the only interpretation anywhere in this file, it is over prose
+rather than over a regex, and `REFUSALS` in tests/test_dialects.py holds all ten
+engines to naming their construct so a reworded message is caught rather than
+quietly swallowed.
 """
 
 from __future__ import annotations

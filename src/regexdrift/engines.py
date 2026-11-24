@@ -59,6 +59,7 @@ as such; an engine that takes it has genuinely refused what you asked.
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -132,6 +133,76 @@ def first_complaint(binary: str, text: str) -> str:
     return first[len(prefix):] if first.startswith(prefix) else first
 
 
+# ripgrep's first line is a header. The construct it refused is on a line of its
+# own, four lines down, and the two between hold the pattern and a caret rule:
+#
+#     rg: regex parse error:
+#         (?:(a)\1)
+#               ^^
+#     error: backreferences are not supported
+#
+# So the one engine in the list whose refusals are the loudest -- and the one the
+# README quotes as a thing the tool is opinionated about -- reported them as
+# `regex parse error:`, which is also what a typo looks like.
+_RG_REASON = "error: "
+
+
+def _rg_complaint(binary: str, text: str) -> str:
+    for line in text.splitlines():
+        if line.startswith(_RG_REASON):
+            return line[len(_RG_REASON):]
+    return ""
+
+
+# gawk prefixes the reason with where it was when it hit it, including the input
+# file and the record number:
+#
+#     gawk: cmd. line:1: (FILENAME=<input> FNR=1) fatal: invalid regexp: Unmatched ( or \(: /(a/
+#
+# The leading two thirds of that is about the run and not about the pattern, and
+# the file it names is the scratch file the CLI made -- which is why `_tidy`
+# exists to rewrite it to `<input>` before anything can print it. Cutting at the
+# severity keeps every word gawk said about the regex and drops the bookkeeping.
+#
+# The same cut applies to warnings, which is how `regexdrift '\d'` comes to print
+# the line the README has claimed since the first commit:
+#
+#     before   warned    gawk: cmd. line:1: (FILENAME=<input> FNR=1) warning: regexp escape sequence `\d' is not a known regexp operator
+#     after    warned    gawk: regexp escape sequence `\d' is not a known regexp operator
+_AWK_SEVERITIES = (" fatal: ", " warning: ")
+
+
+def _awk_complaint(binary: str, text: str) -> str:
+    # The earliest severity marker, because gawk echoes the pattern after the
+    # reason and a pattern is allowed to contain the word "fatal".
+    first = first_complaint(binary, text)
+    found = sorted((first.find(marker), marker) for marker in _AWK_SEVERITIES if marker in first)
+    if not found:
+        return ""
+    at, marker = found[0]
+    return first[at + len(marker):]
+
+
+# sed is handed the pattern wrapped in `\cPATc=` (see the module docstring), so
+# the character offset in its complaint counts into a string the caller never
+# wrote and is wrong about the one they did:
+#
+#     pattern  (a)\1                     5 characters
+#     sed saw  \%(a)\1%=                 9 characters
+#     sed said -e expression #1, char 8: Invalid back reference
+#
+# Character 8 of the caller's pattern does not exist. A number that precise and
+# that wrong is worse than no number, and `-e expression #1` is about sed's
+# argument handling rather than about the regex.
+_SED_BOOKKEEPING = re.compile(r"^-e expression #\d+, char \d+: ")
+
+
+def _sed_complaint(binary: str, text: str) -> str:
+    first = first_complaint(binary, text)
+    stripped = _SED_BOOKKEEPING.sub("", first, count=1)
+    return stripped if stripped != first else ""
+
+
 @dataclass(frozen=True)
 class Result:
     """One engine's answer about one pattern and one set of lines."""
@@ -169,6 +240,34 @@ class Engine:
     # grep-style: 0 matched, 1 matched nothing, >=2 could not. sed-style: any
     # non-zero is a refusal and no output means no matches.
     grep_exit_convention: bool = True
+    # How to find the reason in what this engine wrote, where the default -- the
+    # first line, minus the engine's own name -- is not it. Four of the ten need
+    # one; see `complaint`.
+    _complaint: object = field(default=None, repr=False)
+
+    def complaint(self, text: str) -> str:
+        """What this engine said about the pattern, without its bookkeeping.
+
+        The default is `first_complaint`, and for six of the ten engines the
+        first line of stderr *is* the reason -- including mawk, whose first line
+        names the construct and whose second and third are the echoed pattern
+        and a FILENAME, correctly dropped. The other four bury it: ripgrep under
+        a header, gawk behind an input filename and a record number, and both
+        seds behind a character offset into a string the caller never wrote.
+
+        Reading error text per engine is the one place this tool interprets
+        rather than asks, and it is not the subject -- nothing here reads a
+        regex, only the prose an engine wrote around one. The risk is wording
+        that changes between versions, so an extractor that does not recognise
+        what it was given returns "" and the first line is used instead. That
+        makes the failure mode of a reworded message today's output rather than
+        an empty column, and a per-engine refusal test goes red to say so.
+        """
+        if self._complaint is not None:
+            reason = self._complaint(self.binary, text)  # type: ignore[operator]
+            if reason:
+                return reason
+        return first_complaint(self.binary, text)
 
     def available(self) -> bool:
         """Whether the binary is on PATH.
@@ -203,7 +302,7 @@ class Engine:
         Quotes the pattern, because the claim is only as good as the pattern
         being uncontroversial and the reader should be able to check it.
         """
-        why = first_complaint(self.binary, probe.message) or "no reason given"
+        why = self.complaint(probe.message) or "no reason given"
         return f"{self.binary} is on PATH but refused {PROBE_PATTERN!r}, which every dialect takes: {why}"
 
     def run(self, pattern: str, path: str) -> Result:
@@ -393,6 +492,7 @@ ENGINES: list[Engine] = [
         binary="sed",
         _argv=_sed_argv(None),
         grep_exit_convention=False,
+        _complaint=_sed_complaint,
     ),
     Engine(
         name="sed -E",
@@ -400,6 +500,7 @@ ENGINES: list[Engine] = [
         binary="sed",
         _argv=_sed_argv("-E"),
         grep_exit_convention=False,
+        _complaint=_sed_complaint,
     ),
     Engine(
         name="gawk",
@@ -408,6 +509,7 @@ ENGINES: list[Engine] = [
         _argv=lambda p, path: ["gawk", _AWK_PROGRAM, path],
         _env=_awk_env,
         grep_exit_convention=False,
+        _complaint=_awk_complaint,
     ),
     Engine(
         name="mawk",
@@ -449,6 +551,7 @@ ENGINES: list[Engine] = [
             p,
             path,
         ],
+        _complaint=_rg_complaint,
     ),
 ]
 

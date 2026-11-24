@@ -32,6 +32,7 @@ import tempfile
 from . import probes as probe_module
 from .compare import Comparison, compare
 from .engines import (
+    BY_NAME,
     ENGINES,
     PROBE_PATTERN,
     Engine,
@@ -147,13 +148,22 @@ def _tidy(result: Result, temp_path: str) -> Result:
     )
 
 
-def _strip_prefix(engine: str, text: str) -> str:
-    """The first line of an engine's complaint, without it re-introducing itself.
+def _why(engine: str, text: str) -> str:
+    """The reason an engine gave, as the report prints it.
 
-    The engine's *name* is all this has, so the binary is guessed from it. That
-    is right for every engine whose name starts with its binary and harmless for
-    the two whose does not.
+    Routed through the engine, because four of them say what they objected to
+    somewhere other than the first line and the rule for finding it is theirs
+    (`Engine.complaint`). This used to call `first_complaint` on a binary name
+    guessed from the engine name, which is why `rg` reported every refusal as
+    `regex parse error:` -- true, generic, and also what a typo looks like.
+
+    A name not in `BY_NAME` falls back to the old guess rather than raising: the
+    only way to get one is a `Result` built by hand in a test, and a report is
+    not the place to discover that.
     """
+    known = BY_NAME.get(engine)
+    if known is not None:
+        return known.complaint(text)
     return first_complaint(engine.split()[0], text)
 
 
@@ -229,10 +239,10 @@ def render(comparison: Comparison, chosen: list[Engine], generated: bool, all_li
         print()
 
     for result in comparison.rejected:
-        why = _strip_prefix(result.engine, result.message) or "no reason given"
+        why = _why(result.engine, result.message) or "no reason given"
         print(f"  refused   {result.engine}: {why}")
     for result in comparison.warned:
-        print(f"  warned    {result.engine}: {_strip_prefix(result.engine, result.warning)}")
+        print(f"  warned    {result.engine}: {_why(result.engine, result.warning)}")
     # Each of these says why it could not run, rather than all of them being
     # labelled "(not installed)". That label was hardcoded, and it was already
     # wrong for a sed with no delimiter left -- which is sed being installed and
@@ -266,8 +276,19 @@ def to_json(comparison: Comparison, chosen: list[Engine], generated: bool) -> di
             }
             for group in comparison.groups
         ],
-        "refused": [{"engine": r.engine, "message": r.message} for r in comparison.rejected],
-        "warned": [{"engine": r.engine, "message": r.warning} for r in comparison.warned],
+        # `reason` is what the report prints and `message` is everything the
+        # engine wrote, kept whole. A consumer reading `message` got ripgrep's
+        # seven lines and node's sixteen and had to find the reason itself,
+        # which is the same work the report was getting wrong; one reading
+        # `reason` alone still has the raw text in the next key along.
+        "refused": [
+            {"engine": r.engine, "reason": _why(r.engine, r.message), "message": r.message}
+            for r in comparison.rejected
+        ],
+        "warned": [
+            {"engine": r.engine, "reason": _why(r.engine, r.warning), "message": r.warning}
+            for r in comparison.warned
+        ],
         # Was "not_installed": [name]. An engine can be absent for three
         # reasons and only one of them is a missing package, so the key names
         # what happened and carries the reason with it.

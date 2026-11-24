@@ -283,11 +283,31 @@ def test_the_scratch_file_is_cleaned_up(write_lines, tmp_path, monkeypatch):
 
 @requires("gawk")
 def test_an_engine_warning_does_not_leak_the_scratch_path(capsys):
-    """gawk names the input file, which is different on every run."""
+    """gawk names the input file, which is different on every run.
+
+    This asserted `<input>` was *in* the report, because the report printed
+    gawk's whole first line and `_tidy` had rewritten the path inside it. The
+    report now cuts gawk's bookkeeping off at the severity, so the placeholder
+    is not printed either -- a better line, and it leaves the old assertion
+    passing over something that can no longer appear.
+
+    So the witness moved rather than being deleted. `--json` still carries the
+    message whole, which is where a consumer would meet the path, and that is
+    now the thing being checked. `reason` is checked beside it so the two keys
+    are pinned to the same gawk warning.
+    """
     main([r"\dx", "--engine", "gawk", "--engine", "grep"])
     out = capsys.readouterr().out
     assert "regexdrift-" not in out
-    assert "<input>" in out
+    assert "<input>" not in out, "the report should no longer print gawk's bookkeeping"
+
+    assert main([r"\dx", "--engine", "gawk", "--engine", "grep", "--json"]) is not None
+    raw = capsys.readouterr().out
+    assert "regexdrift-" not in raw
+    warned = json.loads(raw)["warned"]
+    assert warned, "gawk warns about \\d and the json should say so"
+    assert "<input>" in warned[0]["message"], warned
+    assert warned[0]["reason"].startswith("regexp escape sequence"), warned
 
 
 @requires("grep", "gawk")

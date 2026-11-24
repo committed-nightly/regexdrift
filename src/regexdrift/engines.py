@@ -338,9 +338,25 @@ _PYTHON_PROGRAM = (
     "    if p.search(line): print(n)\n"
 )
 
+# Guarded for the same reason python's is, and it was missed because node's
+# failure is louder rather than quieter. An uncaught `new RegExp` throws, and
+# node's uncaught-exception report is sixteen lines that open with the location:
+#
+#     refused   node: [eval]:1
+#
+# which names nothing at all -- not the construct, not even that the subject was
+# a regex. The reason is on line five, and lines two and three are this program
+# text and a caret, so the report was also pasting regexdrift's own source into
+# whatever read it. `err.message` is one line and says which construct:
+# "Invalid regular expression: /(a/: Unterminated group".
+#
+# Exit 2 to match python's adapter, though both are sed-style here and any
+# non-zero reads as a refusal.
 _NODE_PROGRAM = (
     "const fs=require('fs');"
-    "const re=new RegExp(process.argv[1]);"
+    "let re;"
+    "try{re=new RegExp(process.argv[1])}"
+    "catch(err){console.error(err.message);process.exit(2)}"
     "const text=fs.readFileSync(process.argv[2],'utf8');"
     "const lines=text.split('\\n');"
     "if(lines.length&&lines[lines.length-1]==='')lines.pop();"
